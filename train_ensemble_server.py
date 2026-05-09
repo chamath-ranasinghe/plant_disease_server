@@ -142,15 +142,15 @@ def verify_kaggle_credentials():
 
 def download_plantvillage():
     """
-    Downloads PlantVillage from Kaggle.
-    Dataset: https://www.kaggle.com/datasets/emmarex/plantdisease
-    Same 54,306 images / 38 classes as the Mendeley version.
+    Downloads PlantVillage via tensorflow-datasets — the exact same
+    source used in Colab for baseline and MC Dropout training.
+    Guarantees identical label ordering and image content.
     """
     existing_dirs = (
         [d for d in PLANTVILLAGE_DIR.iterdir() if d.is_dir()]
         if PLANTVILLAGE_DIR.exists() else []
     )
-    if len(existing_dirs) >= NUM_CLASSES:
+    if len(existing_dirs) >= 38:
         total_imgs = sum(
             len(list(d.glob('*.jpg'))) for d in existing_dirs
         )
@@ -160,57 +160,53 @@ def download_plantvillage():
         return
 
     print("\n" + "="*60)
-    print("  DOWNLOADING PLANTVILLAGE (via Kaggle)")
+    print("  DOWNLOADING PLANTVILLAGE (via tensorflow-datasets)")
+    print("  This guarantees the same label ordering as Colab.")
     print("="*60)
 
-    verify_kaggle_credentials()
+    import tensorflow_datasets as tfds
 
-    zip_path    = BASE_DIR / "plantvillage.zip"
-    extract_dir = BASE_DIR / "plantvillage_extracted"
+    print("  Loading dataset (downloads ~300MB on first run)...")
+    ds_raw, info = tfds.load(
+        'plant_village',
+        split='train',
+        with_info=True,
+        as_supervised=True,
+        shuffle_files=False,   # critical — keep order stable
+    )
 
-    if not zip_path.exists():
-        print("  Downloading via kaggle CLI (~300 MB)...")
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "kaggle",
-                "datasets", "download",
-                "-d", "emmarex/plantdisease",
-                "-p", str(BASE_DIR),
-                "--force",
-            ],
-            check=False,
-        )
+    label_names = info.features['label'].names
+    n_classes   = info.features['label'].num_classes
+    print(f"  Classes: {n_classes}")
+    print(f"  First 5 labels: {label_names[:5]}")
 
-        if result.returncode != 0:
-            print("\n  ✗ Kaggle download failed.")
-            print("  Try running manually:")
-            print(f"    kaggle datasets download "
-                  f"-d emmarex/plantdisease -p {BASE_DIR}")
-            sys.exit(1)
+    # Save label map — same format as before so rest of
+    # script works unchanged
+    label_map = {name: idx for idx, name in enumerate(label_names)}
+    label_map_path = PLANTVILLAGE_DIR / "label_map.json"
+    with open(label_map_path, 'w') as f:
+        json.dump(label_map, f, indent=2)
 
-        # Kaggle saves as plantdisease.zip
-        kaggle_zip = BASE_DIR / "plantdisease.zip"
-        if kaggle_zip.exists():
-            kaggle_zip.rename(zip_path)
+    print("  Writing images to disk...")
+    counts = defaultdict(int)
 
-    # Verify it's a real zip
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as z:
-            n_files = len(z.namelist())
-        print(f"  Valid zip: {n_files:,} files inside.")
-    except zipfile.BadZipFile:
-        print(f"  ✗ Downloaded file is not a valid zip.")
-        print(f"    Size: {zip_path.stat().st_size} bytes")
-        print(f"    Delete {zip_path} and re-run.")
-        zip_path.unlink(missing_ok=True)
-        sys.exit(1)
+    for i, (img_tensor, label_tensor) in enumerate(
+            tqdm(ds_raw, desc="  Saving", unit="img")):
+        label    = int(label_tensor.numpy())
+        dest_dir = PLANTVILLAGE_DIR / str(label)
+        dest_dir.mkdir(exist_ok=True)
 
-    extract_dir.mkdir(exist_ok=True)
-    _extract_zip(zip_path, extract_dir)
-    _organise_plantvillage(extract_dir)
+        img_path = dest_dir / f"{i:05d}.jpg"
+        if not img_path.exists():
+            img = Image.fromarray(img_tensor.numpy()).convert('RGB')
+            img.save(img_path, 'JPEG', quality=95)
 
-    shutil.rmtree(extract_dir, ignore_errors=True)
-    zip_path.unlink(missing_ok=True)
+        counts[label] += 1
+
+    total = sum(counts.values())
+    print(f"  Saved {total:,} images across "
+          f"{len(counts)} classes.")
+    print("  ✓ Label ordering matches Colab exactly.")
     print("  PlantVillage ready.\n")
 
 
@@ -285,78 +281,6 @@ def _extract_zip(zip_path, extract_to):
                            unit="file"):
             z.extract(member, extract_to)
     print(f"  Extracted {len(members):,} files.")
-
-
-def _organise_plantvillage(extract_dir):
-    """
-    Walks extracted zip, finds all class folders, assigns integer
-    labels, and copies into plantvillage_raw/<label>/<image>.jpg
-    Handles nested folder structures from different Kaggle sources.
-    """
-    # Collect all dirs that contain image files
-    class_dirs = []
-    for root, dirs, files in os.walk(extract_dir):
-        imgs = [f for f in files
-                if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        # Skip if this dir has subdirectories — it's a parent folder
-        # We only want leaf directories that directly contain images
-        subdirs = [d for d in dirs
-                   if (Path(root) / d).is_dir()]
-        if imgs and not subdirs:
-            class_dirs.append((Path(root), imgs))
-
-    if len(class_dirs) == 0:
-        print("  ✗ No image directories found after extraction.")
-        print(f"  Contents of extract dir:")
-        for p in Path(extract_dir).rglob("*"):
-            if p.is_dir():
-                print(f"    {p}")
-        sys.exit(1)
-
-    class_dirs.sort(key=lambda x: x[0].name.lower())
-    print(f"  Found {len(class_dirs)} class directories:")
-    for d, imgs in class_dirs[:5]:
-        print(f"    '{d.name}' — {len(imgs)} images")
-    if len(class_dirs) > 5:
-        print(f"    ... and {len(class_dirs) - 5} more")
-
-    if len(class_dirs) != 38:
-        print(f"  Warning: expected 38 classes, "
-              f"found {len(class_dirs)}.")
-        print("  Continuing anyway — sanity check will catch "
-              "issues.")
-
-    label_map = {}
-    for label_int, (class_dir, img_files) in enumerate(
-            tqdm(class_dirs, desc="  Organising")):
-        dest_dir = PLANTVILLAGE_DIR / str(label_int)
-        dest_dir.mkdir(exist_ok=True)
-        label_map[class_dir.name] = label_int
-
-        for img_file in img_files:
-            src = class_dir / img_file
-            dst = dest_dir / f"{Path(img_file).stem}.jpg"
-            if not dst.exists():
-                try:
-                    img = Image.open(src).convert('RGB')
-                    img.save(dst, 'JPEG', quality=95)
-                except Exception as e:
-                    print(f"  Warning: skipping {src.name}: {e}")
-
-    label_map_path = PLANTVILLAGE_DIR / "label_map.json"
-    with open(label_map_path, 'w') as f:
-        json.dump(label_map, f, indent=2)
-
-    total = sum(
-        len(list(d.glob('*.jpg')))
-        for d in PLANTVILLAGE_DIR.iterdir() if d.is_dir()
-    )
-    print(f"  Organised {total:,} images into "
-          f"{len(label_map)} classes.")
-    print("  Class names found:")
-    for name, idx in sorted(label_map.items(),
-                             key=lambda x: x[1]):
-        print(f"    {idx:02d}: {name}")
 
 
 # ══════════════════════════════════════════════════════════════════

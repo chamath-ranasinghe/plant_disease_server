@@ -5,3 +5,5 @@ tqdm>=4.65.0
 scipy>=1.10.0
 scikit-learn>=1.2.0
 kaggle>=1.5.16
+tensorflow>=2.13.0
+tensorflow-datasets>=4.9.0
