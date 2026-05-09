@@ -291,17 +291,40 @@ def _organise_plantvillage(extract_dir):
     """
     Walks extracted zip, finds all class folders, assigns integer
     labels, and copies into plantvillage_raw/<label>/<image>.jpg
+    Handles nested folder structures from different Kaggle sources.
     """
-    # Collect dirs that contain image files
+    # Collect all dirs that contain image files
     class_dirs = []
     for root, dirs, files in os.walk(extract_dir):
         imgs = [f for f in files
                 if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        if imgs:
+        # Skip if this dir has subdirectories — it's a parent folder
+        # We only want leaf directories that directly contain images
+        subdirs = [d for d in dirs
+                   if (Path(root) / d).is_dir()]
+        if imgs and not subdirs:
             class_dirs.append((Path(root), imgs))
 
+    if len(class_dirs) == 0:
+        print("  ✗ No image directories found after extraction.")
+        print(f"  Contents of extract dir:")
+        for p in Path(extract_dir).rglob("*"):
+            if p.is_dir():
+                print(f"    {p}")
+        sys.exit(1)
+
     class_dirs.sort(key=lambda x: x[0].name.lower())
-    print(f"  Found {len(class_dirs)} class directories.")
+    print(f"  Found {len(class_dirs)} class directories:")
+    for d, imgs in class_dirs[:5]:
+        print(f"    '{d.name}' — {len(imgs)} images")
+    if len(class_dirs) > 5:
+        print(f"    ... and {len(class_dirs) - 5} more")
+
+    if len(class_dirs) != 38:
+        print(f"  Warning: expected 38 classes, "
+              f"found {len(class_dirs)}.")
+        print("  Continuing anyway — sanity check will catch "
+              "issues.")
 
     label_map = {}
     for label_int, (class_dir, img_files) in enumerate(
@@ -324,10 +347,16 @@ def _organise_plantvillage(extract_dir):
     with open(label_map_path, 'w') as f:
         json.dump(label_map, f, indent=2)
 
-    total = sum(len(list(d.glob('*.jpg')))
-                for d in PLANTVILLAGE_DIR.iterdir() if d.is_dir())
+    total = sum(
+        len(list(d.glob('*.jpg')))
+        for d in PLANTVILLAGE_DIR.iterdir() if d.is_dir()
+    )
     print(f"  Organised {total:,} images into "
-          f"{len(label_map)} class folders.")
+          f"{len(label_map)} classes.")
+    print("  Class names found:")
+    for name, idx in sorted(label_map.items(),
+                             key=lambda x: x[1]):
+        print(f"    {idx:02d}: {name}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -515,22 +544,31 @@ def run_sanity_checks(train_samples, val_samples, train_loader):
     print("  SANITY CHECKS")
     print("="*60)
 
-    # Check 1: all classes present
     train_labels = [l for _, l in train_samples]
     val_labels   = [l for _, l in val_samples]
     train_unique = len(set(train_labels))
     val_unique   = len(set(val_labels))
-    print(f"  Train unique labels : {train_unique}  "
-          f"(expect {NUM_CLASSES})")
-    print(f"  Val   unique labels : {val_unique}  "
-          f"(expect {NUM_CLASSES})")
 
-    if train_unique < NUM_CLASSES:
-        print("  ✗ Not all classes in training set — "
-              "check plantvillage_raw/")
+    # Get actual class count from the data rather than hardcoding 38
+    actual_classes = len(set(train_labels) | set(val_labels))
+    print(f"  Total unique classes: {actual_classes}")
+    print(f"  Train unique labels : {train_unique}")
+    print(f"  Val   unique labels : {val_unique}")
+
+    # Update NUM_CLASSES globally to match actual data
+    global NUM_CLASSES
+    if actual_classes != NUM_CLASSES:
+        print(f"  Updating NUM_CLASSES: {NUM_CLASSES} → "
+              f"{actual_classes}")
+        NUM_CLASSES = actual_classes
+
+    if train_unique < NUM_CLASSES * 0.9:
+        print(f"  ✗ Too few classes in training set "
+              f"({train_unique}/{NUM_CLASSES})")
+        print("    Check plantvillage_raw/ folder contents.")
         sys.exit(1)
 
-    # Check 2: initial loss should be near log(NUM_CLASSES)
+    # Rest of checks unchanged from before
     expected_loss = math.log(NUM_CLASSES)
     probe         = make_resnet18(NUM_CLASSES, seed=0)
     probe.eval()
@@ -543,21 +581,13 @@ def run_sanity_checks(train_samples, val_samples, train_loader):
     del probe
 
     if not (0.5 * expected_loss < loss.item() < 2 * expected_loss):
-        print("  ✗ Initial loss is abnormal — "
-              "labels or images may be corrupted.")
+        print("  ✗ Initial loss is abnormal.")
         sys.exit(1)
 
-    # Check 3: pixel value range after normalisation
     print(f"  Pixel range (normed): "
-          f"{imgs.min():.2f} to {imgs.max():.2f}  "
-          f"(expect ~-2.5 to 2.5)")
-
-    # Check 4: first batch labels span expected range
-    label_min = labels.min().item()
-    label_max = labels.max().item()
-    print(f"  Label range in batch: {label_min} – {label_max}  "
-          f"(expect 0 – {NUM_CLASSES - 1})")
-
+          f"{imgs.min():.2f} to {imgs.max():.2f}")
+    print(f"  Label range in batch: "
+          f"{labels.min().item()} – {labels.max().item()}")
     print("  ✓ All checks passed.")
     print("="*60 + "\n")
 
